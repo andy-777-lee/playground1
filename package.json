@@ -1,15 +1,10 @@
 {
   "name": "speed-camera-map",
   "version": "1.0.0",
-  "description": "한국도로공사 구간단속 카메라를 네이버 지도에 표시",
-  "main": "server.js",
+  "description": "한국도로공사 구간단속 카메라를 Leaflet 지도에 표시",
   "type": "module",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node --watch server.js"
-  },
-  "dependencies": {
-    "express": "^4.19.2"
+    "start": "node server.js"
   },
   "engines": {
     "node": ">=18"

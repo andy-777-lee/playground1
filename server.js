@@ -1,20 +1,66 @@
-import express from 'express';
+import http from 'node:http';
+import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const app = express();
 const PORT = process.env.PORT || 3000;
-
-// 한국도로공사 공공데이터 API (구간단속 카메라)
-// 공식 키가 없으면 "test" 키로 호출 가능 (일일 호출량 제한 있음)
 const EX_API_KEY = process.env.EX_API_KEY || 'test';
 const EX_API_BASE = 'http://data.ex.co.kr/openapi/safetyDriving/safeSecCameraList';
 
-app.use(express.static(path.join(__dirname, 'public')));
+const PUBLIC_DIR = path.join(__dirname, 'public');
 
-app.get('/api/section-cameras', async (req, res) => {
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.js': 'application/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.svg': 'image/svg+xml',
+  '.ico': 'image/x-icon',
+};
+
+function sendJson(res, status, body) {
+  const data = Buffer.from(JSON.stringify(body));
+  res.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': data.length,
+  });
+  res.end(data);
+}
+
+async function serveStatic(req, res) {
+  // "/" -> "/index.html"
+  let urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
+  if (urlPath === '/') urlPath = '/index.html';
+
+  // 경로 탈출 방지
+  const safePath = path.normalize(urlPath).replace(/^(\.\.[\\/])+/, '');
+  const filePath = path.join(PUBLIC_DIR, safePath);
+  if (!filePath.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403); res.end('Forbidden'); return;
+  }
+
+  try {
+    const data = await fs.readFile(filePath);
+    const ext = path.extname(filePath).toLowerCase();
+    res.writeHead(200, {
+      'Content-Type': MIME[ext] || 'application/octet-stream',
+      'Content-Length': data.length,
+    });
+    res.end(data);
+  } catch (err) {
+    if (err.code === 'ENOENT') {
+      res.writeHead(404); res.end('Not Found');
+    } else {
+      res.writeHead(500); res.end('Internal Error');
+    }
+  }
+}
+
+async function handleSectionCameras(req, res) {
   try {
     const allRows = [];
     let pageNo = 1;
@@ -23,15 +69,14 @@ app.get('/api/section-cameras', async (req, res) => {
     while (true) {
       const url = `${EX_API_BASE}?key=${encodeURIComponent(EX_API_KEY)}&type=json&numOfRows=${numOfRows}&pageNo=${pageNo}`;
       const r = await fetch(url);
-      if (!r.ok) {
-        return res.status(502).json({ error: `upstream ${r.status}` });
-      }
+      if (!r.ok) return sendJson(res, 502, { error: `upstream ${r.status}` });
+
       const text = await r.text();
       let data;
       try {
         data = JSON.parse(text);
       } catch {
-        return res.status(502).json({ error: 'invalid upstream JSON', body: text.slice(0, 300) });
+        return sendJson(res, 502, { error: 'invalid upstream JSON', body: text.slice(0, 300) });
       }
 
       const list = data.list || data.items || [];
@@ -40,12 +85,11 @@ app.get('/api/section-cameras', async (req, res) => {
       const total = Number(data.totalCount ?? data.count ?? list.length);
       if (allRows.length >= total || list.length === 0) break;
       pageNo += 1;
-      if (pageNo > 50) break; // 안전장치
+      if (pageNo > 50) break;
     }
 
     const normalized = allRows
       .map((row) => {
-        // API 필드명이 환경에 따라 다를 수 있어 관대하게 매핑
         const startLng = Number(row.startGpsXcrd ?? row.startXCrd ?? row.startLng ?? row.xcdnt1);
         const startLat = Number(row.startGpsYcrd ?? row.startYCrd ?? row.startLat ?? row.ycdnt1);
         const endLng = Number(row.endGpsXcrd ?? row.endXCrd ?? row.endLng ?? row.xcdnt2);
@@ -69,12 +113,21 @@ app.get('/api/section-cameras', async (req, res) => {
       })
       .filter((r) => r.start && r.end);
 
-    res.json({ count: normalized.length, sections: normalized });
+    sendJson(res, 200, { count: normalized.length, sections: normalized });
   } catch (err) {
-    res.status(500).json({ error: String(err?.message || err) });
+    sendJson(res, 500, { error: String(err?.message || err) });
   }
+}
+
+const server = http.createServer((req, res) => {
+  const { pathname } = new URL(req.url, 'http://x');
+  if (req.method === 'GET' && pathname === '/api/section-cameras') {
+    return handleSectionCameras(req, res);
+  }
+  if (req.method === 'GET') return serveStatic(req, res);
+  res.writeHead(405); res.end('Method Not Allowed');
 });
 
-app.listen(PORT, () => {
+server.listen(PORT, () => {
   console.log(`Listening on http://localhost:${PORT}`);
 });
