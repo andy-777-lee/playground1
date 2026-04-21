@@ -266,14 +266,22 @@ async function handleSectionCameras(req, res) {
     sendJson(res, 200, { count: normalized.length, sections: normalized });
   } catch (err) {
     console.error('upstream error:', err);
+    const msg = String(err?.message || err);
+    let hint;
+    if (msg.includes('CA certificate key too weak') || msg.includes('key too weak')) {
+      hint = 'OpenSSL 이 약한 CA 를 거부했습니다. 서버를 종료한 뒤 프로젝트 폴더에서 "run.bat" 으로 실행하세요. '
+        + '(run.bat 이 NODE_OPTIONS=--openssl-config=...openssl-legacy.cnf 를 설정해 SECLEVEL=0 으로 내려줍니다.)';
+    } else if (proxyUrl) {
+      hint = '프록시 경유 호출이 실패했습니다. TLS 에러면 ALLOW_INSECURE_TLS=1 를 시도해 보세요 (사내 MITM 프록시 대응).';
+    } else {
+      hint = '사내망에서 data.ex.co.kr 직접 호출이 막혀있을 수 있습니다. HTTP_PROXY 환경변수로 사내 프록시를 지정해 보세요.';
+    }
     sendJson(res, 500, {
-      error: String(err?.message || err),
+      error: msg,
       code: err?.code || null,
       attemptedUrl: err?.attemptedUrl || null,
       redirectChain: err?.redirectChain || null,
-      hint: proxyUrl
-        ? '프록시 경유 호출이 실패했습니다. TLS 에러면 ALLOW_INSECURE_TLS=1 를 시도해 보세요 (사내 MITM 프록시 대응).'
-        : '사내망에서 data.ex.co.kr 직접 호출이 막혀있을 수 있습니다. HTTP_PROXY 환경변수로 사내 프록시를 지정해 보세요.',
+      hint,
     });
   }
 }
@@ -289,7 +297,13 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Listening on http://localhost:${PORT}`);
-  if (!process.env.NODE_OPTIONS?.includes('openssl-config')) {
-    console.log('Tip: data.ex.co.kr 이 약한 CA 를 써서 TLS 가 실패하면 run.bat 으로 실행하세요 (OpenSSL SECLEVEL=0).');
+  const nodeOpts = process.env.NODE_OPTIONS || '';
+  if (nodeOpts.includes('openssl-config')) {
+    console.log(`OpenSSL legacy config ACTIVE via NODE_OPTIONS: ${nodeOpts}`);
+  } else {
+    console.log('!! OpenSSL legacy config NOT active.');
+    console.log('!! data.ex.co.kr 은 약한 CA 를 쓰므로 TLS 가 "CA certificate key too weak" 로 실패합니다.');
+    console.log('!! 서버를 종료하고 "run.bat" 으로 실행하세요 (또는 run.sh / 아래 명령).');
+    console.log('!! Windows CMD:  set NODE_OPTIONS=--openssl-config=%cd%\\openssl-legacy.cnf  &&  node server.js');
   }
 });
