@@ -349,8 +349,14 @@ function loadFromPointSchema(rows, headers, pointIdx) {
 
     const kindStr = idx.kind >= 0 ? String(row[idx.kind] ?? '').trim() : '';
     sampleKinds.add(kindStr);
-    // 단속구분이 "구간" 을 포함하는 것만 (고정식/이동식 제외). 컬럼 자체가 없으면 전체 포함.
-    if (idx.kind >= 0 && !kindStr.includes('구간')) continue;
+    // 경찰청 표준: 단속구분 코드 04 = 구간단속 (일부 파일은 앞자리 0 없이 4).
+    // 문자열로 "구간" 이 들어있는 파일도 지원. 컬럼 자체가 없으면 전체 포함.
+    if (idx.kind >= 0) {
+      const tokens = kindStr.split(/[+,\/\s]+/).filter(Boolean);
+      const isSection = kindStr.includes('구간')
+        || tokens.some((t) => t === '04' || t === '4');
+      if (!isSection) continue;
+    }
     sectionKindCount++;
 
     const lat = Number(row[idx.lat]);
