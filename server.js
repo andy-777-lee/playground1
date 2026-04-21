@@ -1,4 +1,5 @@
 import http from 'node:http';
+import https from 'node:https';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -13,41 +14,66 @@ const EX_API_BASE = 'http://data.ex.co.kr/openapi/safetyDriving/safeSecCameraLis
 const proxyUrl = process.env.HTTP_PROXY || process.env.http_proxy || process.env.HTTPS_PROXY || process.env.https_proxy;
 if (proxyUrl) console.log(`Using proxy: ${proxyUrl}`);
 
-// http 모듈로 GET (HTTP 대상 + 선택적 HTTP 프록시). 응답 본문을 문자열로 돌려준다.
-function httpGet(targetUrl) {
+// http/https GET: 프록시(HTTP 대상만) 경유 + 3xx Location 추적
+const MAX_REDIRECTS = 5;
+
+function requestOnce(targetUrl) {
   return new Promise((resolve, reject) => {
     const target = new URL(targetUrl);
+    const isHttps = target.protocol === 'https:';
+    const mod = isHttps ? https : http;
+
     let options;
-    if (proxyUrl) {
+    if (proxyUrl && !isHttps) {
+      // HTTP 대상은 프록시에 절대 URL 로 전달
       const p = new URL(proxyUrl);
       options = {
         host: p.hostname,
         port: Number(p.port) || 80,
         method: 'GET',
-        path: targetUrl, // 프록시에는 절대 URL 로 보냄
+        path: targetUrl,
         headers: { Host: target.host, 'User-Agent': 'speed-camera-map/1.0' },
       };
     } else {
       options = {
         host: target.hostname,
-        port: Number(target.port) || 80,
+        port: Number(target.port) || (isHttps ? 443 : 80),
         method: 'GET',
         path: target.pathname + target.search,
         headers: { 'User-Agent': 'speed-camera-map/1.0' },
       };
     }
 
-    const req = http.request(options, (res) => {
+    const req = mod.request(options, (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
-        resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf-8') });
+        resolve({
+          status: res.statusCode,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf-8'),
+        });
       });
     });
     req.on('error', reject);
     req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
     req.end();
   });
+}
+
+async function httpGet(startUrl) {
+  let current = startUrl;
+  for (let i = 0; i <= MAX_REDIRECTS; i++) {
+    const r = await requestOnce(current);
+    if (r.status >= 300 && r.status < 400 && r.headers.location) {
+      const next = new URL(r.headers.location, current).toString();
+      console.log(`[${r.status}] redirect -> ${next}`);
+      current = next;
+      continue;
+    }
+    return r;
+  }
+  throw new Error('too many redirects');
 }
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
