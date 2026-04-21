@@ -10,7 +10,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const PORT = process.env.PORT || 3000;
 const EX_API_KEY = process.env.EX_API_KEY || 'test';
-const EX_API_BASE = 'http://data.ex.co.kr/openapi/safetyDriving/safeSecCameraList';
+// 정확한 엔드포인트 이름은 data.ex.co.kr 의 OpenAPI 목록에서 확인 후 EX_API_URL 로 덮어쓰세요.
+const EX_API_BASE = process.env.EX_API_URL || 'https://data.ex.co.kr/openapi/safetyDriving/safeSecCameraList';
 
 // 사내 프록시 지원: HTTP_PROXY 환경변수가 설정되어 있으면 해당 프록시로 요청
 const proxyUrl = process.env.HTTP_PROXY || process.env.http_proxy || process.env.HTTPS_PROXY || process.env.https_proxy;
@@ -227,14 +228,25 @@ async function handleSectionCameras(req, res) {
       const r = await httpGet(url);
       console.log(`  page ${pageNo} -> ${r.status} in ${Date.now() - t0}ms, body ${r.body.length} bytes`);
       if (r.status < 200 || r.status >= 300) {
-        return sendJson(res, 502, { error: `upstream ${r.status}`, body: r.body.slice(0, 300) });
+        const isHtml = /^\s*<|<html/i.test(r.body);
+        return sendJson(res, 502, {
+          error: `upstream ${r.status}`,
+          body: r.body.slice(0, 300),
+          hint: isHtml
+            ? `엔드포인트 URL 이 잘못됐을 수 있습니다 (HTML 404 반환). data.ex.co.kr 에서 정확한 경로 확인 후 EX_API_URL 환경변수로 지정하세요. 현재 URL: ${EX_API_BASE}`
+            : undefined,
+        });
       }
 
       let data;
       try {
         data = JSON.parse(r.body);
       } catch {
-        return sendJson(res, 502, { error: 'invalid upstream JSON', body: r.body.slice(0, 300) });
+        return sendJson(res, 502, {
+          error: 'invalid upstream JSON',
+          body: r.body.slice(0, 300),
+          hint: `응답이 JSON 이 아닙니다. type=json 을 지원하지 않는 엔드포인트일 수 있습니다. 현재 URL: ${EX_API_BASE}`,
+        });
       }
 
       const list = data.list || data.items || [];
