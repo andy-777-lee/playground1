@@ -9,6 +9,47 @@ const PORT = process.env.PORT || 3000;
 const EX_API_KEY = process.env.EX_API_KEY || 'test';
 const EX_API_BASE = 'http://data.ex.co.kr/openapi/safetyDriving/safeSecCameraList';
 
+// 사내 프록시 지원: HTTP_PROXY 환경변수가 설정되어 있으면 해당 프록시로 요청
+const proxyUrl = process.env.HTTP_PROXY || process.env.http_proxy || process.env.HTTPS_PROXY || process.env.https_proxy;
+if (proxyUrl) console.log(`Using proxy: ${proxyUrl}`);
+
+// http 모듈로 GET (HTTP 대상 + 선택적 HTTP 프록시). 응답 본문을 문자열로 돌려준다.
+function httpGet(targetUrl) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(targetUrl);
+    let options;
+    if (proxyUrl) {
+      const p = new URL(proxyUrl);
+      options = {
+        host: p.hostname,
+        port: Number(p.port) || 80,
+        method: 'GET',
+        path: targetUrl, // 프록시에는 절대 URL 로 보냄
+        headers: { Host: target.host, 'User-Agent': 'speed-camera-map/1.0' },
+      };
+    } else {
+      options = {
+        host: target.hostname,
+        port: Number(target.port) || 80,
+        method: 'GET',
+        path: target.pathname + target.search,
+        headers: { 'User-Agent': 'speed-camera-map/1.0' },
+      };
+    }
+
+    const req = http.request(options, (res) => {
+      const chunks = [];
+      res.on('data', (c) => chunks.push(c));
+      res.on('end', () => {
+        resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString('utf-8') });
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
+    req.end();
+  });
+}
+
 const PUBLIC_DIR = path.join(__dirname, 'public');
 
 const MIME = {
@@ -68,15 +109,16 @@ async function handleSectionCameras(req, res) {
 
     while (true) {
       const url = `${EX_API_BASE}?key=${encodeURIComponent(EX_API_KEY)}&type=json&numOfRows=${numOfRows}&pageNo=${pageNo}`;
-      const r = await fetch(url);
-      if (!r.ok) return sendJson(res, 502, { error: `upstream ${r.status}` });
+      const r = await httpGet(url);
+      if (r.status < 200 || r.status >= 300) {
+        return sendJson(res, 502, { error: `upstream ${r.status}`, body: r.body.slice(0, 300) });
+      }
 
-      const text = await r.text();
       let data;
       try {
-        data = JSON.parse(text);
+        data = JSON.parse(r.body);
       } catch {
-        return sendJson(res, 502, { error: 'invalid upstream JSON', body: text.slice(0, 300) });
+        return sendJson(res, 502, { error: 'invalid upstream JSON', body: r.body.slice(0, 300) });
       }
 
       const list = data.list || data.items || [];
@@ -115,7 +157,13 @@ async function handleSectionCameras(req, res) {
 
     sendJson(res, 200, { count: normalized.length, sections: normalized });
   } catch (err) {
-    sendJson(res, 500, { error: String(err?.message || err) });
+    console.error('upstream error:', err);
+    sendJson(res, 500, {
+      error: String(err?.code || err?.message || err),
+      hint: proxyUrl
+        ? '프록시를 통해 호출했지만 실패했습니다. 프록시 URL과 대상 접근 권한을 확인하세요.'
+        : '사내망에서 data.ex.co.kr 직접 호출이 막혀있을 수 있습니다. HTTP_PROXY 환경변수로 사내 프록시를 지정해 보세요.',
+    });
   }
 }
 
