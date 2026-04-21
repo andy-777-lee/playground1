@@ -22,6 +22,13 @@ if (INSECURE_TLS) console.warn('WARNING: TLS certificate verification is disable
 
 const MAX_REDIRECTS = 5;
 
+// data.ex.co.kr 이 약한 키 CA 를 써서 Node OpenSSL SECLEVEL 기본값이 거부함.
+// 소켓/요청마다 ciphers 문자열에 @SECLEVEL=0 를 명시해 보안 레벨을 낮춘다.
+const WEAK_CA_CIPHERS = 'DEFAULT:@SECLEVEL=0';
+
+// 여기서 한 번 더 전역 기본값도 덮어쓴다 (Node 버전에 따라 DEFAULT_CIPHERS 만 존중하는 경우 대응)
+try { tls.DEFAULT_CIPHERS = WEAK_CA_CIPHERS; } catch {}
+
 // 프록시에 CONNECT 로 터널링해서 TLS 소켓을 여는 헬퍼 (HTTPS 대상 + 프록시)
 function openProxyTunnel(target) {
   return new Promise((resolve, reject) => {
@@ -42,6 +49,7 @@ function openProxyTunnel(target) {
         socket,
         servername: target.hostname,
         rejectUnauthorized: !INSECURE_TLS,
+        ciphers: WEAK_CA_CIPHERS,
       });
       tlsSock.once('secureConnect', () => resolve(tlsSock));
       tlsSock.once('error', reject);
@@ -103,6 +111,7 @@ function requestOnce(targetUrl) {
           host: target.hostname,
           port: Number(target.port) || 443,
           rejectUnauthorized: !INSECURE_TLS,
+          ciphers: WEAK_CA_CIPHERS,
         }, collectResponse);
         req.on('error', reject);
         req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
@@ -120,6 +129,7 @@ function requestOnce(targetUrl) {
       path: target.pathname + target.search,
       headers: commonHeaders,
       rejectUnauthorized: isHttps ? !INSECURE_TLS : undefined,
+      ciphers: isHttps ? WEAK_CA_CIPHERS : undefined,
     }, collectResponse);
     req.on('error', reject);
     req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
@@ -269,8 +279,8 @@ async function handleSectionCameras(req, res) {
     const msg = String(err?.message || err);
     let hint;
     if (msg.includes('CA certificate key too weak') || msg.includes('key too weak')) {
-      hint = 'OpenSSL 이 약한 CA 를 거부했습니다. 서버를 종료한 뒤 프로젝트 폴더에서 "run.bat" 으로 실행하세요. '
-        + '(run.bat 이 NODE_OPTIONS=--openssl-config=...openssl-legacy.cnf 를 설정해 SECLEVEL=0 으로 내려줍니다.)';
+      hint = 'TLS SECLEVEL=0 우회가 적용됐는데도 OpenSSL 이 약한 CA 를 거부했습니다. '
+        + 'run.bat 으로 실행해 OpenSSL config 도 함께 적용해 보세요 (NODE_OPTIONS=--openssl-config=openssl-legacy.cnf).';
     } else if (proxyUrl) {
       hint = '프록시 경유 호출이 실패했습니다. TLS 에러면 ALLOW_INSECURE_TLS=1 를 시도해 보세요 (사내 MITM 프록시 대응).';
     } else {
@@ -297,13 +307,8 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Listening on http://localhost:${PORT}`);
-  const nodeOpts = process.env.NODE_OPTIONS || '';
-  if (nodeOpts.includes('openssl-config')) {
-    console.log(`OpenSSL legacy config ACTIVE via NODE_OPTIONS: ${nodeOpts}`);
-  } else {
-    console.log('!! OpenSSL legacy config NOT active.');
-    console.log('!! data.ex.co.kr 은 약한 CA 를 쓰므로 TLS 가 "CA certificate key too weak" 로 실패합니다.');
-    console.log('!! 서버를 종료하고 "run.bat" 으로 실행하세요 (또는 run.sh / 아래 명령).');
-    console.log('!! Windows CMD:  set NODE_OPTIONS=--openssl-config=%cd%\\openssl-legacy.cnf  &&  node server.js');
+  console.log(`TLS ciphers override: ${WEAK_CA_CIPHERS} (for weak CA on data.ex.co.kr)`);
+  if (process.env.NODE_OPTIONS?.includes('openssl-config')) {
+    console.log(`OpenSSL legacy config also ACTIVE: ${process.env.NODE_OPTIONS}`);
   }
 });
