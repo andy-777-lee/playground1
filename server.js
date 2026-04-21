@@ -212,7 +212,10 @@ async function handleSectionCameras(req, res) {
 
     while (true) {
       const url = `${EX_API_BASE}?key=${encodeURIComponent(EX_API_KEY)}&type=json&numOfRows=${numOfRows}&pageNo=${pageNo}`;
+      const t0 = Date.now();
+      console.log(`fetching page ${pageNo}...`);
       const r = await httpGet(url);
+      console.log(`  page ${pageNo} -> ${r.status} in ${Date.now() - t0}ms, body ${r.body.length} bytes`);
       if (r.status < 200 || r.status >= 300) {
         return sendJson(res, 502, { error: `upstream ${r.status}`, body: r.body.slice(0, 300) });
       }
@@ -228,10 +231,12 @@ async function handleSectionCameras(req, res) {
       allRows.push(...list);
 
       const total = Number(data.totalCount ?? data.count ?? list.length);
+      console.log(`  accumulated ${allRows.length}/${total}`);
       if (allRows.length >= total || list.length === 0) break;
       pageNo += 1;
       if (pageNo > 50) break;
     }
+    console.log(`upstream done: ${allRows.length} rows fetched across ${pageNo} page(s)`);
 
     const normalized = allRows
       .map((row) => {
