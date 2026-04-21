@@ -12,17 +12,7 @@ const PORT = process.env.PORT || 3000;
 const EX_API_KEY = process.env.EX_API_KEY || 'test';
 const EX_API_BASE = 'http://data.ex.co.kr/openapi/safetyDriving/safeSecCameraList';
 
-// 네이버 지도 Client ID 를 프론트엔드로 주입
-const NAVER_MAP_CLIENT_ID = process.env.NAVER_MAP_CLIENT_ID || '';
-
 app.use(express.static(path.join(__dirname, 'public')));
-
-app.get('/config.js', (req, res) => {
-  res.type('application/javascript');
-  res.send(`window.__APP_CONFIG__ = ${JSON.stringify({
-    naverMapClientId: NAVER_MAP_CLIENT_ID,
-  })};`);
-});
 
 app.get('/api/section-cameras', async (req, res) => {
   try {
@@ -87,7 +77,4 @@ app.get('/api/section-cameras', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Listening on http://localhost:${PORT}`);
-  if (!NAVER_MAP_CLIENT_ID) {
-    console.warn('NAVER_MAP_CLIENT_ID 환경변수가 설정되지 않았습니다. 지도가 로드되지 않을 수 있습니다.');
-  }
 });

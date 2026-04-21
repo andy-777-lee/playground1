@@ -4,11 +4,15 @@
 <meta charset="UTF-8" />
 <title>고속도로 구간단속 지도</title>
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY=" crossorigin="" />
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo=" crossorigin=""></script>
 <style>
   html, body { margin: 0; padding: 0; height: 100%; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
   #map { width: 100%; height: 100%; }
   #panel {
-    position: absolute; top: 12px; left: 12px; z-index: 10;
+    position: absolute; top: 12px; left: 12px; z-index: 1000;
     background: rgba(255,255,255,0.95); padding: 12px 14px; border-radius: 8px;
     box-shadow: 0 2px 8px rgba(0,0,0,0.2); min-width: 220px;
   }
@@ -21,7 +25,6 @@
   #controls { margin-top: 8px; }
   #controls label { font-size: 12px; display: flex; align-items: center; gap: 4px; }
 </style>
-<script src="/config.js"></script>
 </head>
 <body>
 <div id="panel">
@@ -36,31 +39,21 @@
 </div>
 <div id="map"></div>
 <script>
-  const clientId = (window.__APP_CONFIG__ || {}).naverMapClientId;
-  if (!clientId) {
-    document.getElementById('status').textContent =
-      'NAVER_MAP_CLIENT_ID 가 설정되지 않았습니다. 서버 실행 시 환경변수를 지정하세요.';
-  } else {
-    const s = document.createElement('script');
-    s.src = `https://oapi.map.naver.com/openapi/v3/maps.js?ncpClientId=${encodeURIComponent(clientId)}`;
-    s.onload = init;
-    s.onerror = () => {
-      document.getElementById('status').textContent = '네이버 지도 스크립트 로드 실패. Client ID 확인 필요.';
-    };
-    document.head.appendChild(s);
-  }
-
   const UP_COLOR = '#e63946';
   const DOWN_COLOR = '#1d4ed8';
 
-  const overlays = { up: [], down: [] };
+  const map = L.map('map', { center: [36.5, 127.8], zoom: 7 });
 
-  async function init() {
-    const map = new naver.maps.Map('map', {
-      center: new naver.maps.LatLng(36.5, 127.8),
-      zoom: 7,
-    });
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+  }).addTo(map);
 
+  const upGroup = L.featureGroup().addTo(map);
+  const downGroup = L.featureGroup().addTo(map);
+  const groups = { up: upGroup, down: downGroup };
+
+  (async () => {
     const status = document.getElementById('status');
     status.textContent = '데이터 불러오는 중...';
 
@@ -74,68 +67,52 @@
       return;
     }
 
-    const bounds = new naver.maps.LatLngBounds();
     let drawn = 0;
+    const allBounds = [];
 
     data.sections.forEach((sec) => {
       if (sec.direction === 'unknown') return;
       const color = sec.direction === 'up' ? UP_COLOR : DOWN_COLOR;
-      const startLL = new naver.maps.LatLng(sec.start.lat, sec.start.lng);
-      const endLL = new naver.maps.LatLng(sec.end.lat, sec.end.lng);
+      const start = [sec.start.lat, sec.start.lng];
+      const end = [sec.end.lat, sec.end.lng];
 
-      const line = new naver.maps.Polyline({
-        map,
-        path: [startLL, endLL],
-        strokeColor: color,
-        strokeOpacity: 0.85,
-        strokeWeight: 5,
-      });
-
-      const startMarker = new naver.maps.Marker({
-        map,
-        position: startLL,
-        icon: {
-          content: `<div style="width:10px;height:10px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 0 2px rgba(0,0,0,0.5);"></div>`,
-          anchor: new naver.maps.Point(7, 7),
-        },
-      });
-      const endMarker = new naver.maps.Marker({
-        map,
-        position: endLL,
-        icon: {
-          content: `<div style="width:10px;height:10px;border-radius:50%;background:${color};border:2px solid white;box-shadow:0 0 2px rgba(0,0,0,0.5);"></div>`,
-          anchor: new naver.maps.Point(7, 7),
-        },
-      });
-
-      const infoHtml = `
-        <div style="padding:8px 10px;font-size:13px;line-height:1.4;">
+      const popupHtml = `
+        <div style="font-size:13px;line-height:1.5;">
           <div><b>${sec.routeNm || ''} (${sec.routeNo || ''})</b></div>
           <div>${sec.direction === 'up' ? '상행' : '하행'} · 제한속도 ${sec.limitSpeed ?? '-'} km/h</div>
           <div>${sec.startName || ''} → ${sec.endName || ''}</div>
         </div>`;
-      const info = new naver.maps.InfoWindow({ content: infoHtml, borderWidth: 0, disableAnchor: true });
-      naver.maps.Event.addListener(line, 'click', (e) => info.open(map, e.coord));
-      naver.maps.Event.addListener(startMarker, 'click', () => info.open(map, startLL));
-      naver.maps.Event.addListener(endMarker, 'click', () => info.open(map, endLL));
 
-      overlays[sec.direction].push(line, startMarker, endMarker);
+      const line = L.polyline([start, end], {
+        color, weight: 5, opacity: 0.85,
+      }).bindPopup(popupHtml);
 
-      bounds.extend(startLL);
-      bounds.extend(endLL);
+      const startDot = L.circleMarker(start, {
+        radius: 5, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1,
+      }).bindPopup(popupHtml);
+
+      const endDot = L.circleMarker(end, {
+        radius: 5, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1,
+      }).bindPopup(popupHtml);
+
+      groups[sec.direction].addLayer(line);
+      groups[sec.direction].addLayer(startDot);
+      groups[sec.direction].addLayer(endDot);
+
+      allBounds.push(start, end);
       drawn += 1;
     });
 
-    if (drawn > 0) map.fitBounds(bounds);
+    if (allBounds.length > 0) map.fitBounds(allBounds, { padding: [20, 20] });
     status.textContent = `구간단속 ${drawn}개 표시 (총 ${data.count})`;
 
     document.getElementById('toggleUp').addEventListener('change', (e) => {
-      overlays.up.forEach((o) => o.setMap(e.target.checked ? map : null));
+      if (e.target.checked) upGroup.addTo(map); else upGroup.remove();
     });
     document.getElementById('toggleDown').addEventListener('change', (e) => {
-      overlays.down.forEach((o) => o.setMap(e.target.checked ? map : null));
+      if (e.target.checked) downGroup.addTo(map); else downGroup.remove();
     });
-  }
+  })();
 </script>
 </body>
 </html>
