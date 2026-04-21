@@ -21,6 +21,7 @@
   .swatch { width: 14px; height: 4px; border-radius: 2px; display: inline-block; }
   .up { background: #e63946; }
   .down { background: #1d4ed8; }
+  .unknown { background: #888; }
   #status { font-size: 12px; color: #555; margin-top: 6px; }
   #controls { margin-top: 8px; }
   #controls label { font-size: 12px; display: flex; align-items: center; gap: 4px; }
@@ -31,16 +32,17 @@
   <h1>고속도로 구간단속 카메라</h1>
   <div class="legend"><span class="swatch up"></span> 상행</div>
   <div class="legend"><span class="swatch down"></span> 하행</div>
+  <div class="legend"><span class="swatch unknown"></span> 방향 미상</div>
   <div id="controls">
     <label><input type="checkbox" id="toggleUp" checked /> 상행 표시</label>
     <label><input type="checkbox" id="toggleDown" checked /> 하행 표시</label>
+    <label><input type="checkbox" id="toggleUnknown" checked /> 방향 미상 표시</label>
   </div>
   <div id="status">로딩 중...</div>
 </div>
 <div id="map"></div>
 <script>
-  const UP_COLOR = '#e63946';
-  const DOWN_COLOR = '#1d4ed8';
+  const COLORS = { up: '#e63946', down: '#1d4ed8', unknown: '#888' };
 
   const map = L.map('map', { center: [36.5, 127.8], zoom: 7 });
 
@@ -49,9 +51,11 @@
     attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
   }).addTo(map);
 
-  const upGroup = L.featureGroup().addTo(map);
-  const downGroup = L.featureGroup().addTo(map);
-  const groups = { up: upGroup, down: downGroup };
+  const groups = {
+    up: L.featureGroup().addTo(map),
+    down: L.featureGroup().addTo(map),
+    unknown: L.featureGroup().addTo(map),
+  };
 
   (async () => {
     const status = document.getElementById('status');
@@ -71,47 +75,50 @@
     const allBounds = [];
 
     data.sections.forEach((sec) => {
-      if (sec.direction === 'unknown') return;
-      const color = sec.direction === 'up' ? UP_COLOR : DOWN_COLOR;
+      const color = COLORS[sec.direction] || COLORS.unknown;
       const start = [sec.start.lat, sec.start.lng];
       const end = [sec.end.lat, sec.end.lng];
+      const isPoint = start[0] === end[0] && start[1] === end[1];
+      const dirLabel = sec.direction === 'up' ? '상행' : sec.direction === 'down' ? '하행' : (sec.rawDirection || '방향 미상');
 
       const popupHtml = `
         <div style="font-size:13px;line-height:1.5;">
-          <div><b>${sec.routeNm || ''} (${sec.routeNo || ''})</b></div>
-          <div>${sec.direction === 'up' ? '상행' : '하행'} · 제한속도 ${sec.limitSpeed ?? '-'} km/h</div>
-          <div>${sec.startName || ''} → ${sec.endName || ''}</div>
+          <div><b>${sec.routeNm || ''} ${sec.routeNo ? '(' + sec.routeNo + ')' : ''}</b></div>
+          <div>${dirLabel} · 제한속도 ${sec.limitSpeed ?? '-'} km/h</div>
+          ${sec.startName ? `<div>${sec.startName}${sec.endName ? ' / ' + sec.endName : ''}</div>` : ''}
         </div>`;
 
-      const line = L.polyline([start, end], {
-        color, weight: 5, opacity: 0.85,
-      }).bindPopup(popupHtml);
+      const group = groups[sec.direction] || groups.unknown;
 
-      const startDot = L.circleMarker(start, {
-        radius: 5, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1,
-      }).bindPopup(popupHtml);
+      if (!isPoint) {
+        group.addLayer(L.polyline([start, end], { color, weight: 5, opacity: 0.85 }).bindPopup(popupHtml));
+      }
+      group.addLayer(L.circleMarker(start, {
+        radius: isPoint ? 6 : 5, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1,
+      }).bindPopup(popupHtml));
+      if (!isPoint) {
+        group.addLayer(L.circleMarker(end, {
+          radius: 5, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1,
+        }).bindPopup(popupHtml));
+      }
 
-      const endDot = L.circleMarker(end, {
-        radius: 5, color: '#fff', weight: 2, fillColor: color, fillOpacity: 1,
-      }).bindPopup(popupHtml);
-
-      groups[sec.direction].addLayer(line);
-      groups[sec.direction].addLayer(startDot);
-      groups[sec.direction].addLayer(endDot);
-
-      allBounds.push(start, end);
+      allBounds.push(start);
+      if (!isPoint) allBounds.push(end);
       drawn += 1;
     });
 
     if (allBounds.length > 0) map.fitBounds(allBounds, { padding: [20, 20] });
-    status.textContent = `구간단속 ${drawn}개 표시 (총 ${data.count})`;
+    status.textContent = `${drawn}개 표시 (총 ${data.count})`;
 
-    document.getElementById('toggleUp').addEventListener('change', (e) => {
-      if (e.target.checked) upGroup.addTo(map); else upGroup.remove();
-    });
-    document.getElementById('toggleDown').addEventListener('change', (e) => {
-      if (e.target.checked) downGroup.addTo(map); else downGroup.remove();
-    });
+    const bindToggle = (id, key) => {
+      document.getElementById(id).addEventListener('change', (e) => {
+        if (e.target.checked) groups[key].addTo(map);
+        else groups[key].remove();
+      });
+    };
+    bindToggle('toggleUp', 'up');
+    bindToggle('toggleDown', 'down');
+    bindToggle('toggleUnknown', 'unknown');
   })();
 </script>
 </body>

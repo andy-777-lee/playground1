@@ -240,6 +240,18 @@ function findCol(headers, keywords) {
   return -1;
 }
 
+function classifyDirection(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return 'unknown';
+  // 직접 문자열 매칭
+  if (['1', 'S', 'U', '상', '상행', '상행선'].includes(s)) return 'up';
+  if (['2', '0', 'E', 'D', '하', '하행', '하행선'].includes(s)) return 'down';
+  // 부분 포함 (예: "상행(서울방향)", "하행선")
+  if (s.includes('상행') || s.includes('상 행')) return 'up';
+  if (s.includes('하행') || s.includes('하 행')) return 'down';
+  return 'unknown';
+}
+
 async function loadSectionsFromCsv(csvPath) {
   const buf = await fs.readFile(csvPath);
   const text = decodeBuffer(buf);
@@ -249,58 +261,124 @@ async function loadSectionsFromCsv(csvPath) {
   const headers = rows[0].map((h) => h.trim());
   console.log('CSV headers:', headers);
 
-  const idx = {
-    routeNo: findCol(headers, ['노선번호', '노선No', '노선넘버']),
-    routeNm: findCol(headers, ['노선명', '노선이름']),
-    direction: findCol(headers, ['방향', '상하행', '상·하행']),
+  // 스키마 1: 구간 단위 (시점/종점 좌표 모두 있음)
+  const sectionIdx = {
     startLat: findCol(headers, ['시점위도', '시작위도', '시점Y', '시점_위도']),
     startLng: findCol(headers, ['시점경도', '시작경도', '시점X', '시점_경도']),
     endLat: findCol(headers, ['종점위도', '종료위도', '종점Y', '종점_위도']),
     endLng: findCol(headers, ['종점경도', '종료경도', '종점X', '종점_경도']),
-    startName: findCol(headers, ['시점명', '시작지점', '시점지점명', '시점위치']),
-    endName: findCol(headers, ['종점명', '종료지점', '종점지점명', '종점위치']),
-    limitSpeed: findCol(headers, ['제한속도', '제한 속도', '속도제한']),
   };
-  console.log('mapped columns:', idx);
+  const isSectionSchema = Object.values(sectionIdx).every((v) => v >= 0);
 
-  const missing = Object.entries(idx)
-    .filter(([k, v]) => ['startLat', 'startLng', 'endLat', 'endLng', 'direction'].includes(k) && v < 0)
-    .map(([k]) => k);
-  if (missing.length) {
-    throw new Error(`필수 컬럼을 찾지 못함: ${missing.join(', ')} / 헤더: ${headers.join(' | ')}`);
-  }
+  // 스키마 2: 카메라 단위 (단일 위도/경도 + 단속구분)
+  const pointIdx = {
+    lat: findCol(headers, ['위도', 'lat', 'latitude']),
+    lng: findCol(headers, ['경도', 'lng', 'longitude', 'lon']),
+    kind: findCol(headers, ['단속구분', '단속유형', '카메라구분', '카메라유형']),
+  };
+  const isPointSchema = pointIdx.lat >= 0 && pointIdx.lng >= 0;
 
-  const sections = [];
+  if (isSectionSchema) return loadFromSectionSchema(rows, headers, sectionIdx);
+  if (isPointSchema) return loadFromPointSchema(rows, headers, pointIdx);
+
+  throw new Error(`지원하는 컬럼을 찾지 못함. 헤더: ${headers.join(' | ')}`);
+}
+
+function loadFromSectionSchema(rows, headers, sectionIdx) {
+  console.log('schema: section (시점/종점 좌표)');
+  const idx = {
+    ...sectionIdx,
+    routeNo: findCol(headers, ['노선번호', '노선No']),
+    routeNm: findCol(headers, ['노선명', '노선이름', '노선']),
+    direction: findCol(headers, ['방향', '상하행', '상·하행', '도로노선방향']),
+    startName: findCol(headers, ['시점명', '시점지점명']),
+    endName: findCol(headers, ['종점명', '종점지점명']),
+    limitSpeed: findCol(headers, ['제한속도', '속도제한']),
+  };
+  console.log('mapped:', idx);
+  if (idx.direction < 0) throw new Error(`방향 컬럼을 찾지 못함. 헤더: ${headers.join(' | ')}`);
+
+  const out = [];
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
-    if (!row || row.length === 1 && !row[0]) continue;
-
-    const rawDir = String(row[idx.direction] ?? '').trim();
-    let direction = 'unknown';
-    if (['1', 'S', 'U', '상', '상행', '상행선'].includes(rawDir)) direction = 'up';
-    else if (['2', '0', 'E', 'D', '하', '하행', '하행선'].includes(rawDir)) direction = 'down';
-
+    if (!row || (row.length === 1 && !row[0])) continue;
     const startLat = Number(row[idx.startLat]);
     const startLng = Number(row[idx.startLng]);
     const endLat = Number(row[idx.endLat]);
     const endLng = Number(row[idx.endLng]);
-    if (!Number.isFinite(startLat) || !Number.isFinite(startLng) || !Number.isFinite(endLat) || !Number.isFinite(endLng)) continue;
-
-    sections.push({
+    if (![startLat, startLng, endLat, endLng].every(Number.isFinite)) continue;
+    out.push({
       routeNo: idx.routeNo >= 0 ? String(row[idx.routeNo] ?? '').trim() : '',
       routeNm: idx.routeNm >= 0 ? String(row[idx.routeNm] ?? '').trim() : '',
       startName: idx.startName >= 0 ? String(row[idx.startName] ?? '').trim() : '',
       endName: idx.endName >= 0 ? String(row[idx.endName] ?? '').trim() : '',
       limitSpeed: idx.limitSpeed >= 0 ? Number(row[idx.limitSpeed]) || null : null,
-      direction,
-      rawDirection: rawDir,
+      direction: classifyDirection(row[idx.direction]),
+      rawDirection: String(row[idx.direction] ?? '').trim(),
       start: { lat: startLat, lng: startLng },
       end: { lat: endLat, lng: endLng },
+      kind: 'section',
+    });
+  }
+  console.log(`loaded ${out.length} sections`);
+  return out;
+}
+
+function loadFromPointSchema(rows, headers, pointIdx) {
+  console.log('schema: point (카메라 한 대 = 한 행)');
+  const idx = {
+    ...pointIdx,
+    routeNm: findCol(headers, ['도로노선명', '도로종류', '노선명', '노선']),
+    direction: findCol(headers, ['도로노선방향', '방향', '상하행']),
+    addr: findCol(headers, ['소재지도로명주소', '소재지지번주소', '주소']),
+    limitSpeed: findCol(headers, ['제한속도', '속도제한']),
+    agency: findCol(headers, ['관리기관명', '관리기관']),
+    mgmtId: findCol(headers, ['관리번호']),
+  };
+  console.log('mapped:', idx);
+
+  let totalRows = 0;
+  let sectionKindCount = 0;
+  const out = [];
+  const sampleKinds = new Set();
+
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || (row.length === 1 && !row[0])) continue;
+    totalRows++;
+
+    const kindStr = idx.kind >= 0 ? String(row[idx.kind] ?? '').trim() : '';
+    sampleKinds.add(kindStr);
+    // 단속구분이 "구간" 을 포함하는 것만 (고정식/이동식 제외). 컬럼 자체가 없으면 전체 포함.
+    if (idx.kind >= 0 && !kindStr.includes('구간')) continue;
+    sectionKindCount++;
+
+    const lat = Number(row[idx.lat]);
+    const lng = Number(row[idx.lng]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+    const rawDir = idx.direction >= 0 ? String(row[idx.direction] ?? '').trim() : '';
+    out.push({
+      routeNo: idx.mgmtId >= 0 ? String(row[idx.mgmtId] ?? '').trim() : '',
+      routeNm: idx.routeNm >= 0 ? String(row[idx.routeNm] ?? '').trim() : '',
+      startName: idx.addr >= 0 ? String(row[idx.addr] ?? '').trim() : '',
+      endName: idx.agency >= 0 ? String(row[idx.agency] ?? '').trim() : '',
+      limitSpeed: idx.limitSpeed >= 0 ? Number(row[idx.limitSpeed]) || null : null,
+      direction: classifyDirection(rawDir),
+      rawDirection: rawDir,
+      // 점도 기존 {start,end} 스키마에 맞춰 동일 좌표로 채움
+      start: { lat, lng },
+      end: { lat, lng },
+      kind: 'point',
     });
   }
 
-  console.log(`loaded ${sections.length} sections from CSV`);
-  return sections;
+  console.log(`total rows: ${totalRows}, section-kind rows: ${sectionKindCount}, plotted: ${out.length}`);
+  console.log(`observed 단속구분 values (sample): ${[...sampleKinds].slice(0, 8).join(', ')}`);
+  if (out.length === 0) {
+    throw new Error(`그릴 데이터가 없습니다. 단속구분 샘플: ${[...sampleKinds].join(', ')}`);
+  }
+  return out;
 }
 
 async function serveStatic(req, res) {
