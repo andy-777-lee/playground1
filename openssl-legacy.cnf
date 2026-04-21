@@ -1,0 +1,16 @@
+# OpenSSL security level 을 0 으로 내려 약한 키 CA 를 허용.
+# 일부 한국 공공 API 서버가 1024비트 RSA CA 를 쓰고 있어 Node 기본 SECLEVEL=1 이
+# "CA certificate key too weak" 로 거부하는 문제 해결용.
+# 실행: NODE_OPTIONS=--openssl-config=openssl-legacy.cnf node server.js
+
+openssl_conf = openssl_init
+
+[openssl_init]
+ssl_conf = ssl_sect
+
+[ssl_sect]
+system_default = system_default_sect
+
+[system_default_sect]
+CipherString = DEFAULT:@SECLEVEL=0
+Options = UnsafeLegacyRenegotiation

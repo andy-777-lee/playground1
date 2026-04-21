@@ -284,4 +284,7 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Listening on http://localhost:${PORT}`);
+  if (!process.env.NODE_OPTIONS?.includes('openssl-config')) {
+    console.log('Tip: data.ex.co.kr 이 약한 CA 를 써서 TLS 가 실패하면 run.bat 으로 실행하세요 (OpenSSL SECLEVEL=0).');
+  }
 });
