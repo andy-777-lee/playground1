@@ -186,6 +186,123 @@ function sendJson(res, status, body) {
   res.end(data);
 }
 
+// --- CSV 파싱 ---
+
+function decodeBuffer(buf) {
+  // BOM 있으면 utf-8
+  if (buf[0] === 0xEF && buf[1] === 0xBB && buf[2] === 0xBF) {
+    return new TextDecoder('utf-8').decode(buf.subarray(3));
+  }
+  // utf-8 fatal 시도 → 실패하면 한국어 EUC-KR / CP949
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {}
+  for (const enc of ['euc-kr', 'cp949', 'ks_c_5601-1987']) {
+    try {
+      const d = new TextDecoder(enc).decode(buf);
+      console.log(`CSV decoded as ${enc}`);
+      return d;
+    } catch {}
+  }
+  // 최후: lossy utf-8
+  return new TextDecoder('utf-8').decode(buf);
+}
+
+function parseCsv(text) {
+  const rows = [];
+  let field = '';
+  let row = [];
+  let inQuotes = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') { field += '"'; i++; }
+        else inQuotes = false;
+      } else field += ch;
+    } else {
+      if (ch === '"') inQuotes = true;
+      else if (ch === ',') { row.push(field); field = ''; }
+      else if (ch === '\r') { /* skip */ }
+      else if (ch === '\n') { row.push(field); rows.push(row); row = []; field = ''; }
+      else field += ch;
+    }
+  }
+  if (field.length > 0 || row.length > 0) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function findCol(headers, keywords) {
+  for (const kw of keywords) {
+    const idx = headers.findIndex((h) => h && h.replace(/\s+/g, '').includes(kw.replace(/\s+/g, '')));
+    if (idx >= 0) return idx;
+  }
+  return -1;
+}
+
+async function loadSectionsFromCsv(csvPath) {
+  const buf = await fs.readFile(csvPath);
+  const text = decodeBuffer(buf);
+  const rows = parseCsv(text).filter((r) => r.length > 1);
+  if (rows.length < 2) throw new Error('CSV 에 데이터가 없습니다.');
+
+  const headers = rows[0].map((h) => h.trim());
+  console.log('CSV headers:', headers);
+
+  const idx = {
+    routeNo: findCol(headers, ['노선번호', '노선No', '노선넘버']),
+    routeNm: findCol(headers, ['노선명', '노선이름']),
+    direction: findCol(headers, ['방향', '상하행', '상·하행']),
+    startLat: findCol(headers, ['시점위도', '시작위도', '시점Y', '시점_위도']),
+    startLng: findCol(headers, ['시점경도', '시작경도', '시점X', '시점_경도']),
+    endLat: findCol(headers, ['종점위도', '종료위도', '종점Y', '종점_위도']),
+    endLng: findCol(headers, ['종점경도', '종료경도', '종점X', '종점_경도']),
+    startName: findCol(headers, ['시점명', '시작지점', '시점지점명', '시점위치']),
+    endName: findCol(headers, ['종점명', '종료지점', '종점지점명', '종점위치']),
+    limitSpeed: findCol(headers, ['제한속도', '제한 속도', '속도제한']),
+  };
+  console.log('mapped columns:', idx);
+
+  const missing = Object.entries(idx)
+    .filter(([k, v]) => ['startLat', 'startLng', 'endLat', 'endLng', 'direction'].includes(k) && v < 0)
+    .map(([k]) => k);
+  if (missing.length) {
+    throw new Error(`필수 컬럼을 찾지 못함: ${missing.join(', ')} / 헤더: ${headers.join(' | ')}`);
+  }
+
+  const sections = [];
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || row.length === 1 && !row[0]) continue;
+
+    const rawDir = String(row[idx.direction] ?? '').trim();
+    let direction = 'unknown';
+    if (['1', 'S', 'U', '상', '상행', '상행선'].includes(rawDir)) direction = 'up';
+    else if (['2', '0', 'E', 'D', '하', '하행', '하행선'].includes(rawDir)) direction = 'down';
+
+    const startLat = Number(row[idx.startLat]);
+    const startLng = Number(row[idx.startLng]);
+    const endLat = Number(row[idx.endLat]);
+    const endLng = Number(row[idx.endLng]);
+    if (!Number.isFinite(startLat) || !Number.isFinite(startLng) || !Number.isFinite(endLat) || !Number.isFinite(endLng)) continue;
+
+    sections.push({
+      routeNo: idx.routeNo >= 0 ? String(row[idx.routeNo] ?? '').trim() : '',
+      routeNm: idx.routeNm >= 0 ? String(row[idx.routeNm] ?? '').trim() : '',
+      startName: idx.startName >= 0 ? String(row[idx.startName] ?? '').trim() : '',
+      endName: idx.endName >= 0 ? String(row[idx.endName] ?? '').trim() : '',
+      limitSpeed: idx.limitSpeed >= 0 ? Number(row[idx.limitSpeed]) || null : null,
+      direction,
+      rawDirection: rawDir,
+      start: { lat: startLat, lng: startLng },
+      end: { lat: endLat, lng: endLng },
+    });
+  }
+
+  console.log(`loaded ${sections.length} sections from CSV`);
+  return sections;
+}
+
 async function serveStatic(req, res) {
   // "/" -> "/index.html"
   let urlPath = decodeURIComponent(new URL(req.url, 'http://x').pathname);
@@ -216,6 +333,21 @@ async function serveStatic(req, res) {
 }
 
 async function handleSectionCameras(req, res) {
+  // CSV_PATH 가 지정됐으면 로컬 CSV 우선
+  if (process.env.CSV_PATH) {
+    try {
+      const sections = await loadSectionsFromCsv(process.env.CSV_PATH);
+      return sendJson(res, 200, { count: sections.length, sections, source: 'csv', path: process.env.CSV_PATH });
+    } catch (err) {
+      console.error('CSV load error:', err);
+      return sendJson(res, 500, {
+        error: String(err?.message || err),
+        code: err?.code || null,
+        hint: `CSV_PATH=${process.env.CSV_PATH} 를 읽지 못했습니다. 경로와 파일 내용을 확인하세요.`,
+      });
+    }
+  }
+
   try {
     const allRows = [];
     let pageNo = 1;
@@ -319,8 +451,10 @@ const server = http.createServer((req, res) => {
 
 server.listen(PORT, () => {
   console.log(`Listening on http://localhost:${PORT}`);
-  console.log(`TLS ciphers override: ${WEAK_CA_CIPHERS} (for weak CA on data.ex.co.kr)`);
-  if (process.env.NODE_OPTIONS?.includes('openssl-config')) {
-    console.log(`OpenSSL legacy config also ACTIVE: ${process.env.NODE_OPTIONS}`);
+  if (process.env.CSV_PATH) {
+    console.log(`Data source: CSV file -> ${process.env.CSV_PATH}`);
+  } else {
+    console.log(`Data source: EX API -> ${EX_API_BASE}`);
+    console.log(`TLS ciphers override: ${WEAK_CA_CIPHERS}`);
   }
 });
