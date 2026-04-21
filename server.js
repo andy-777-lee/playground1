@@ -1,5 +1,7 @@
 import http from 'node:http';
 import https from 'node:https';
+import tls from 'node:tls';
+import net from 'node:net';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,37 +16,55 @@ const EX_API_BASE = 'http://data.ex.co.kr/openapi/safetyDriving/safeSecCameraLis
 const proxyUrl = process.env.HTTP_PROXY || process.env.http_proxy || process.env.HTTPS_PROXY || process.env.https_proxy;
 if (proxyUrl) console.log(`Using proxy: ${proxyUrl}`);
 
-// http/https GET: 프록시(HTTP 대상만) 경유 + 3xx Location 추적
+// TLS 검증 우회 (사내 MITM 프록시 환경용). 기본값은 검증 ON.
+const INSECURE_TLS = process.env.ALLOW_INSECURE_TLS === '1';
+if (INSECURE_TLS) console.warn('WARNING: TLS certificate verification is disabled.');
+
 const MAX_REDIRECTS = 5;
+
+// 프록시에 CONNECT 로 터널링해서 TLS 소켓을 여는 헬퍼 (HTTPS 대상 + 프록시)
+function openProxyTunnel(target) {
+  return new Promise((resolve, reject) => {
+    const p = new URL(proxyUrl);
+    const connectReq = http.request({
+      host: p.hostname,
+      port: Number(p.port) || 80,
+      method: 'CONNECT',
+      path: `${target.hostname}:${Number(target.port) || 443}`,
+      headers: { Host: `${target.hostname}:${Number(target.port) || 443}` },
+    });
+    connectReq.on('connect', (res, socket) => {
+      if (res.statusCode !== 200) {
+        reject(new Error(`proxy CONNECT failed: ${res.statusCode}`));
+        return;
+      }
+      const tlsSock = tls.connect({
+        socket,
+        servername: target.hostname,
+        rejectUnauthorized: !INSECURE_TLS,
+      });
+      tlsSock.once('secureConnect', () => resolve(tlsSock));
+      tlsSock.once('error', reject);
+    });
+    connectReq.on('error', reject);
+    connectReq.setTimeout(15000, () => connectReq.destroy(new Error('proxy CONNECT timeout')));
+    connectReq.end();
+  });
+}
 
 function requestOnce(targetUrl) {
   return new Promise((resolve, reject) => {
     const target = new URL(targetUrl);
     const isHttps = target.protocol === 'https:';
-    const mod = isHttps ? https : http;
 
-    let options;
-    if (proxyUrl && !isHttps) {
-      // HTTP 대상은 프록시에 절대 URL 로 전달
-      const p = new URL(proxyUrl);
-      options = {
-        host: p.hostname,
-        port: Number(p.port) || 80,
-        method: 'GET',
-        path: targetUrl,
-        headers: { Host: target.host, 'User-Agent': 'speed-camera-map/1.0' },
-      };
-    } else {
-      options = {
-        host: target.hostname,
-        port: Number(target.port) || (isHttps ? 443 : 80),
-        method: 'GET',
-        path: target.pathname + target.search,
-        headers: { 'User-Agent': 'speed-camera-map/1.0' },
-      };
-    }
+    const commonHeaders = {
+      Host: target.host,
+      'User-Agent': 'speed-camera-map/1.0',
+      Accept: '*/*',
+      Connection: 'close',
+    };
 
-    const req = mod.request(options, (res) => {
+    const collectResponse = (res) => {
       const chunks = [];
       res.on('data', (c) => chunks.push(c));
       res.on('end', () => {
@@ -54,7 +74,53 @@ function requestOnce(targetUrl) {
           body: Buffer.concat(chunks).toString('utf-8'),
         });
       });
-    });
+    };
+
+    if (proxyUrl && !isHttps) {
+      // HTTP 대상은 프록시에 절대 URL 로 그대로 전달
+      const p = new URL(proxyUrl);
+      const req = http.request({
+        host: p.hostname,
+        port: Number(p.port) || 80,
+        method: 'GET',
+        path: targetUrl,
+        headers: commonHeaders,
+      }, collectResponse);
+      req.on('error', reject);
+      req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
+      req.end();
+      return;
+    }
+
+    if (proxyUrl && isHttps) {
+      // HTTPS 대상은 프록시에 CONNECT 로 터널 뚫고 그 위에 HTTPS
+      openProxyTunnel(target).then((tlsSock) => {
+        const req = https.request({
+          createConnection: () => tlsSock,
+          method: 'GET',
+          path: target.pathname + target.search,
+          headers: commonHeaders,
+          host: target.hostname,
+          port: Number(target.port) || 443,
+          rejectUnauthorized: !INSECURE_TLS,
+        }, collectResponse);
+        req.on('error', reject);
+        req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
+        req.end();
+      }, reject);
+      return;
+    }
+
+    // 프록시 없음 (HTTP or HTTPS 직접)
+    const mod = isHttps ? https : http;
+    const req = mod.request({
+      host: target.hostname,
+      port: Number(target.port) || (isHttps ? 443 : 80),
+      method: 'GET',
+      path: target.pathname + target.search,
+      headers: commonHeaders,
+      rejectUnauthorized: isHttps ? !INSECURE_TLS : undefined,
+    }, collectResponse);
     req.on('error', reject);
     req.setTimeout(15000, () => req.destroy(new Error('request timeout')));
     req.end();
@@ -63,17 +129,28 @@ function requestOnce(targetUrl) {
 
 async function httpGet(startUrl) {
   let current = startUrl;
+  const chain = [current];
   for (let i = 0; i <= MAX_REDIRECTS; i++) {
-    const r = await requestOnce(current);
+    let r;
+    try {
+      r = await requestOnce(current);
+    } catch (err) {
+      err.attemptedUrl = current;
+      err.redirectChain = chain;
+      throw err;
+    }
     if (r.status >= 300 && r.status < 400 && r.headers.location) {
       const next = new URL(r.headers.location, current).toString();
       console.log(`[${r.status}] redirect -> ${next}`);
+      chain.push(next);
       current = next;
       continue;
     }
     return r;
   }
-  throw new Error('too many redirects');
+  const err = new Error('too many redirects');
+  err.redirectChain = chain;
+  throw err;
 }
 
 const PUBLIC_DIR = path.join(__dirname, 'public');
@@ -185,9 +262,12 @@ async function handleSectionCameras(req, res) {
   } catch (err) {
     console.error('upstream error:', err);
     sendJson(res, 500, {
-      error: String(err?.code || err?.message || err),
+      error: String(err?.message || err),
+      code: err?.code || null,
+      attemptedUrl: err?.attemptedUrl || null,
+      redirectChain: err?.redirectChain || null,
       hint: proxyUrl
-        ? '프록시를 통해 호출했지만 실패했습니다. 프록시 URL과 대상 접근 권한을 확인하세요.'
+        ? '프록시 경유 호출이 실패했습니다. TLS 에러면 ALLOW_INSECURE_TLS=1 를 시도해 보세요 (사내 MITM 프록시 대응).'
         : '사내망에서 data.ex.co.kr 직접 호출이 막혀있을 수 있습니다. HTTP_PROXY 환경변수로 사내 프록시를 지정해 보세요.',
     });
   }
